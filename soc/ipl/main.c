@@ -32,6 +32,7 @@ extern uint32_t GFXPAL[];
 extern uint32_t GFXTILES[];
 extern uint32_t GFXTILEMAPA[];
 extern uint32_t GFXTILEMAPB[];
+extern uint32_t GFXSPRITES[];
 
 uint8_t *lcdfb;
 
@@ -43,6 +44,11 @@ typedef void (*main_cb)(int argc, char **argv);
 
 int simulated() {
 	return MISC_REG(MISC_SOC_VER)&0x8000;
+}
+
+//When in verilator, this starts a trace of the SoC.
+void verilator_start_trace() {
+	MISC_REG(MISC_SOC_VER)=1;
 }
 
 void cdc_task();
@@ -75,8 +81,70 @@ void gfx_set_xlate_val(int layer, int xcenter, int ycenter, float scale, float r
 	GFX_REG(GFX_TILEA_INC_ROW)=(i_dy_y<<16)+(i_dy_x&0xffff);
 }
 
+void set_sprite(int no, int x, int y, int sx, int sy, int tileno, int palstart) {
+	x+=64;
+	y+=64;
+	GFXSPRITES[no*2]=(y<<16)|x;
+	GFXSPRITES[no*2+1]=sx|(sy<<8)|(tileno<<16)|((palstart/4)<<25);
+}
+
+#define ITEM_MAX 256
+
+#define ITEM_FLAG_SELECTABLE (1<<0)
+#define ITEM_FLAG_ON_CART (1<<1)
+
+typedef struct {
+	int no_items;
+	int flag[ITEM_MAX];
+	char *item[ITEM_MAX];
+} menu_data_t;
+
+
+void menu_add_apps(menu_data_t *s, char *path, int flag) {
+	DIR *d=opendir(path);
+	struct dirent *ed;
+	int found=0;
+	while (ed=readdir(d)) {
+//		if (strlen(ed->d_name)>4 && strcasecmp(&ed->d_name[strlen(ed->d_name)-4], ".elf")==0) {
+			s->item[s->no_items]=strdup(ed->d_name);
+			s->flag[s->no_items++]=flag;
+			found=1;
+//		}
+	}
+	if (!found) {
+		s->item[s->no_items]=strdup("*NO FILES*");
+		s->flag[s->no_items++]=flag;
+	}
+	closedir(d);
+}
+
+
+void read_menu_items(menu_data_t *s) {
+	//First, clean struct
+	for (int i=0; i<s->no_items; i++) free(s->item[i]);
+	s->no_items=0;
+	//Check if external memory is available.
+	int has_cart=(flash_get_uid(FLASH_SEL_CART)!=0);
+	if (has_cart) {
+		s->flag[s->no_items]=0;
+		s->item[s->no_items++]=strdup("- CARTRIDGE -");
+		//ToDo: load files from cart
+		s->flag[s->no_items]=0;
+		s->item[s->no_items++]=strdup("- INTERNAL -");
+	}
+	menu_add_apps(s, "/", 0);
+}
+
+
+#define SCR_PITCH 20 //Scoller letter pitch
 
 int show_main_menu(char *app_name) {
+	menu_data_t menu={0};
+
+	//First read of available items
+	usb_msc_off();
+	read_menu_items(&menu);
+
 	//Allocate fb memory
 	lcdfb=malloc(320*512/2);
 
@@ -104,7 +172,6 @@ int show_main_menu(char *app_name) {
 	lcd_init(simulated());
 	printf("GFX inited. Yay!!\n");
 
-
 	printf("Loading bgnd...\n");
 	//This is the Hackaday logo background
 	gfx_load_fb_mem(lcdfb, &GFXPAL[FB_PAL_OFFSET], 4, 512, &_binary_bgnd_png_start, (&_binary_bgnd_png_end-&_binary_bgnd_png_start));
@@ -115,8 +182,9 @@ int show_main_menu(char *app_name) {
 	printf("bgnd loaded.\n");
 
 	//Enable layers needed
-	GFX_REG(GFX_LAYEREN_REG)=GFX_LAYEREN_FB|GFX_LAYEREN_TILEB|GFX_LAYEREN_TILEA;
-
+	GFX_REG(GFX_LAYEREN_REG)=GFX_LAYEREN_FB|GFX_LAYEREN_TILEB|GFX_LAYEREN_TILEA|GFX_LAYEREN_SPR;
+	GFXPAL[FB_PAL_OFFSET+0x100]=0x00ff00ff; //Note: For some reason, the sprites use this as default bgnd. ToDo: fix this...
+	GFXPAL[FB_PAL_OFFSET+0x1ff]=0x40ff00ff; //so it becomes this instead.
 
 	//loop
 	int p=0;
@@ -125,6 +193,11 @@ int show_main_menu(char *app_name) {
 	int bgnd_pal_state=10;
 	int selected=-1;
 	int done=0;
+	const char scrtxt[]="                       "
+						"Welcome to the Hackaday Supercon 2019 IPL menu thingy! Select an app "
+						"or insert an USB cable to modify the files on the flash. Have fun!"
+						"                       ";
+	int scrpos=0;
 	while(!done) {
 		p++;
 
@@ -136,6 +209,16 @@ int show_main_menu(char *app_name) {
 
 		gfx_set_xlate_val(0, 240,24, 1+sin(p*0.2)*0.1, sin(p*0.11)*0.1);
 
+		int sprno=0;
+		for (int x=-(scrpos%SCR_PITCH); x<480; x+=SCR_PITCH) {
+			float a=x*0.02+scrpos*0.1;
+			set_sprite(sprno++, x, 280+sin(a)*20, 16+cos(a)*8, 16+cos(a)*8, scrtxt[scrpos/SCR_PITCH+sprno], 0);
+		}
+		if (scrtxt[scrpos/SCR_PITCH+sprno]==0) scrpos=0;
+		scrpos+=2;
+//		set_sprite(65, 0, 0, 16, 16, 132, 0);
+
+
 		int usbstate=MISC_REG(MISC_GPEXT_IN_REG)&(1<<31);
 		if (usbstate!=old_usbstate) {
 			if (usbstate) {
@@ -143,8 +226,10 @@ int show_main_menu(char *app_name) {
 				fprintf(console, "\0330M\033C\0330A"); //Set map to tilemap A, clear tilemap, set attr to 0
 				fprintf(console, "\0338;1PUSB CONNECTED"); //Menu header.
 				fprintf(console, "\0331M\033C\n"); //clear menu
+				selected=-1;
 			} else {
 				usb_msc_off();
+				read_menu_items(&menu);
 				fprintf(console, "\0330M\033C\0330A"); //Set map to tilemap A, clear tilemap, set attr to 0
 				fprintf(console, "\0338;1PSELECT AN APP\n\n"); //Menu header.
 				fprintf(console, "\0331M\033C\n"); //clear menu
@@ -154,53 +239,50 @@ int show_main_menu(char *app_name) {
 		old_usbstate=usbstate;
 
 		int btn=MISC_REG(MISC_BTN_REG);
-		//ToDo: we possibly want to store the list of files, so we can select an app even when USB is connected. This will 
-		//help for apps which e.g. use the usb cdc-acm
-		if (!usbstate) {
-			int need_redraw=0;
-			if (selected==-1) {
-				need_redraw=1;
-				selected=0;
-				app_name[0]=0;
-			}
-			if (btn&BUTTON_A && !(old_btn&BUTTON_A)) {
-				//start up app
-				done=1;
-			} else if (btn & BUTTON_UP && !(old_btn&BUTTON_UP)) {
-				selected=selected-1;
-				if (selected==-1) selected=0;
-				need_redraw=1;
-			} else if (btn & BUTTON_DOWN && !(old_btn&BUTTON_DOWN)) {
-				selected=selected+1;
-				need_redraw=1;
-			}
+		int need_redraw=0;
+		if (selected==-1) {
+			need_redraw=1;
+			selected=0;
+		}
+		int movedir=0;
+		if (btn&BUTTON_A && !(old_btn&BUTTON_A)) {
+			//start up app
+			done=1;
+		} else if (btn & BUTTON_UP && !(old_btn&BUTTON_UP)) {
+			movedir=-1;
+			need_redraw=1;
+		} else if (btn & BUTTON_DOWN && !(old_btn&BUTTON_DOWN)) {
+			movedir=1;
+			need_redraw=1;
+		}
+		//Note: This assumes there's always one selectable item in the menu.
+		do {
+			selected+=movedir;
+			if (selected<0) selected=menu.no_items-1;
+			if (selected>=menu.no_items) selected=0;
+		} while((menu.flag[selected] & ITEM_FLAG_SELECTABLE)!=0);
 
-			while (need_redraw) {
-				fprintf(console, "\033C");
-				DIR *d=opendir("/");
-				struct dirent *ed;
-				int n=0;
-				while (ed=readdir(d)) {
-					fprintf(console, "\0338;%dP %c %s\n", n+4, n==selected?16:32, ed->d_name);
-					if (n==selected) strcpy(app_name, ed->d_name);
-					n++;
-				}
-				closedir(d);
-				if (n<=selected) {
-					selected=n-1;
-				} else {
-					need_redraw=0;
-				}
+		if (need_redraw) {
+			fprintf(console, "\033C");
+			
+			int start=selected-5;
+			for (int i=0; i<10; i++) {
+				const char *itm;
+				itm="";
+				if (i+start>=0 && i+start<menu.no_items) itm=menu.item[i+start];
+				fprintf(console, "\0338;%dP %c %s\n", i+4, (i+start)==selected?16:32, itm);
 			}
 		}
 
 		while ((GFX_REG(GFX_VIDPOS_REG)>>16)<318) {
-			usb_poll();
 			cdc_task();
 			tud_task();
 		}
 		old_btn=btn;
 	}
+
+	strcpy(app_name, menu.item[selected]);
+	for (int i=0; i<menu.no_items; i++) free(menu.item[i]);
 
 	//Set tilemaps to default 1-to-1 mapping
 	GFX_REG(GFX_TILEA_OFF)=(0<<16)+(0&0xffff);
@@ -230,8 +312,17 @@ void start_app(char *app) {
 	maincall(0, NULL);
 }
 
+extern uint32_t *irq_stack_ptr;
+
+#define IRQ_STACK_SIZE (16*1024)
 void main() {
+	syscall_reinit();
+	//Initialize IRQ stack to be bigger than the bootrom stack
+	uint32_t *int_stack=malloc(IRQ_STACK_SIZE);
+	irq_stack_ptr=int_stack+(IRQ_STACK_SIZE/sizeof(uint32_t));
+
 	//Initialize USB subsystem
+	printf("IPL main function.\n");
 	tusb_init();
 	printf("USB inited.\n");
 	
@@ -240,7 +331,6 @@ void main() {
 	printf("Filesystem inited.\n");
 	while(1) {
 		MISC_REG(MISC_LED_REG)=0xfffff;
-		syscall_reinit();
 		printf("IPL running.\n");
 		char app_name[256];
 		show_main_menu(app_name);
@@ -248,6 +338,7 @@ void main() {
 		usb_msc_off();
 		syscall_reinit();
 		start_app(app_name);
+		syscall_reinit();
 		printf("IPL: App %s returned.\n", app_name);
 	}
 }

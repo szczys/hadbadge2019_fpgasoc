@@ -125,8 +125,8 @@ git submodule update --init --recursive
 ``
 
 Now you need a toolchain for the FPGA and the RiscV stuff.Compile Yosys, nextpnr, 
-prjtrellis and a RiscV toolchain according to their instructions. (ToDo: how 
-to build toolchain?)
+prjtrellis and a RiscV toolchain according to their instructions. (For RiscV
+toolchain instructions, see below.)
 Alternatively, get precompiled versions for your OS here: 
 https://github.com/xobs/ecp5-toolchain/releases
 You probably want to make sure nextpnr/yosys binaries are in your $PATH if you need to do 
@@ -138,6 +138,16 @@ or IPL:
 cd hadbadge2019_fpgasoc/TinyFPGA-Bootloader/programmer
 sudo python setup.py install
 ```
+
+If you want to compile your own RiscV toolchain, see https://github.com/riscv/riscv-gnu-toolchain .
+Specifically, you want a multilib Newlib toolchain, something that is not in the list. Just
+invoke these two commands after having fulfilled all prerequisites and you should be good:
+
+```
+./configure --prefix=/opt/riscv
+make
+```
+
 
 Flash tinyfpga-boot to the badge
 --------------------------------
@@ -155,6 +165,18 @@ adapter. If you still want to do this, for example if you managed to nule your f
 - Answer `yes` on the prompt
 
 - Wait until flashing is complete.
+
+Install tinyprog from TinyFPGA-Bootloader
+-----------------------------------------
+
+tinyprog is used to flash SoC and IPL via USB. It can be installed from the TinyFPGA-Bootloader of this repo:
+
+```
+cd hadbadge2019_fpgasoc
+git submodule update --init --recursive
+cd TinyFPGA-Bootloader/programmer
+sudo python setup.py install
+```
 
 Synthesize and upload the SoC
 -----------------------------
